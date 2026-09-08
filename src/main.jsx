@@ -248,6 +248,22 @@ const timeRanges = (value) => {
     ranges.push([toMinutes(matches[index]), toMinutes(matches[index + 1])]);
   return ranges;
 };
+const timeLabels = (value) => {
+  const matches = (value || "").match(/\d{1,2}(?::\d{2}|h)/g) || [];
+  const normalize = (time) => time.replace("h", ":00").padStart(5, "0");
+  const labels = [];
+  for (let index = 0; index + 1 < matches.length; index += 2)
+    labels.push(
+      `${normalize(matches[index])} – ${normalize(matches[index + 1])}`,
+    );
+  return labels;
+};
+const timeSummary = (value) => {
+  const labels = timeLabels(value);
+  return labels.length > 1
+    ? `${labels.length} horários`
+    : labels[0] || "Horário não informado";
+};
 const classDays = (value) =>
   Object.entries(dayAliases)
     .filter(([label]) => (value || "").includes(label))
@@ -268,14 +284,16 @@ const schedulesOverlap = (a, b) => {
   );
 };
 function analyzeRooms(target, classes) {
-  const teacherConflict =
-    target.teacher !== "A CONTRATAR" &&
-    classes.some(
-      (item) =>
-        item.id !== target.id &&
-        item.teacher === target.teacher &&
-        schedulesOverlap(target, item),
-    );
+  const teacherConflicts =
+    target.teacher !== "A CONTRATAR"
+      ? classes.filter(
+          (item) =>
+            item.id !== target.id &&
+            item.teacher.trim().toLowerCase() ===
+              target.teacher.trim().toLowerCase() &&
+            schedulesOverlap(target, item),
+        )
+      : [];
   return roomOptions.map((room) => {
     const occupants = classes.filter(
       (t) => t.id !== target.id && t.room === room.name,
@@ -285,42 +303,67 @@ function analyzeRooms(target, classes) {
     const localOk =
       (target.local || "").trim().toUpperCase() ===
       (room.local || "").trim().toUpperCase();
-    const ok = Boolean(
-      target.agenda &&
-      capacityOk &&
-      localOk &&
-      !conflicts.length &&
-      !teacherConflict,
+    const issues = [];
+    conflicts.forEach((item) =>
+      issues.push({
+        type: "room",
+        title: "Conflito de sala",
+        text: `${room.name} já está ocupada por ${item.course}.`,
+        item,
+      }),
+    );
+    teacherConflicts.forEach((item) =>
+      issues.push({
+        type: "teacher",
+        title: "Conflito de professor",
+        text: `${target.teacher} já ministra ${item.course}.`,
+        item,
+      }),
+    );
+    if (!capacityOk)
+      issues.push({
+        type: "capacity",
+        title: "Capacidade insuficiente",
+        text: `Necessário: ${target.students} alunos · Sala: ${room.capacity} lugares`,
+      });
+    if (!localOk)
+      issues.push({
+        type: "location",
+        title: "Unidade incompatível",
+        text: `A turma pertence a ${target.local || "outra unidade"}.`,
+      });
+    if (!target.agenda)
+      issues.push({
+        type: "agenda",
+        title: "Agenda incompatível",
+        text: "Defina dias, período e horário antes de alocar.",
+      });
+    const ok = issues.length === 0;
+    const incompatible = issues.some((issue) =>
+      ["capacity", "location", "agenda"].includes(issue.type),
     );
     return {
       ...room,
       ok,
-      conflict: conflicts.length > 0,
+      conflict: conflicts.length > 0 || teacherConflicts.length > 0,
+      roomAvailable: conflicts.length === 0,
+      teacherAvailable: teacherConflicts.length === 0,
+      capacityOk,
+      localOk,
+      issues,
+      category: ok ? "available" : incompatible ? "incompatible" : "conflict",
       disabled: !ok,
-      state: !target.agenda
-        ? "Agenda necessária"
-        : teacherConflict
-          ? "Professor indisponível"
-          : !capacityOk
-            ? "Incompatível"
-            : !localOk
-              ? "Outra unidade"
-              : conflicts.length
-                ? "Conflito"
-                : "Disponível",
-      detail: !target.agenda
-        ? "Defina uma agenda antes de alocar."
-        : teacherConflict
-          ? "O professor já possui outra turma neste dia e horário."
-          : !capacityOk
-            ? `Capacidade insuficiente: ${room.capacity} para ${target.students} matrículas.`
-            : !localOk
-              ? "Sala localizada em outra unidade."
-              : conflicts.length
-                ? `Conflita com ${conflicts.map((t) => `${t.code} (${t.time})`).join(", ")}.`
-                : "Disponível durante todo o período.",
+      state: ok
+        ? "Disponível"
+        : incompatible
+          ? "Incompatível"
+          : "Com conflitos",
+      detail: ok
+        ? "Sala e professor disponíveis durante todo o período."
+        : `${issues.length} impedimento(s) encontrado(s).`,
       occupants,
       conflicts,
+      teacherConflicts,
     };
   });
 }
@@ -378,6 +421,23 @@ const Badge = ({ children, kind = "" }) => (
     {children}
   </span>
 );
+function TimeDisplay({ value, expanded = false }) {
+  const labels = timeLabels(value);
+  if (labels.length <= 1)
+    return <span className="time-single">{labels[0] || "Não informado"}</span>;
+  return expanded ? (
+    <span className="time-list">
+      {labels.map((label) => (
+        <span key={label}>{label}</span>
+      ))}
+    </span>
+  ) : (
+    <span className="time-summary" title={labels.join(" · ")}>
+      <Clock3 size={13} />
+      {labels.length} horários
+    </span>
+  );
+}
 const needsRoom = (item) =>
   !item.room &&
   !["encerrada", "cancelada"].includes((item.sig || "").trim().toLowerCase());
@@ -391,6 +451,7 @@ function Sidebar({ page, navigate, pending }) {
     ["courses", "Cursos", GraduationCap],
     ["teachers", "Professores", UserRound],
     ["calendar", "Calendário", CalendarDays],
+    ["week", "Grade semanal", TableProperties],
     ["map", "Mapa de Turmas", TableProperties],
   ];
   return (
@@ -553,7 +614,8 @@ function Dashboard({ classes, navigate, findRoom }) {
                 <h3>{t.course}</h3>
               </div>
               <p>
-                {t.code} · {t.teacher} · {t.start} · {t.time}
+                {t.code} · {t.teacher} · {t.start} ·{" "}
+                <TimeDisplay value={t.time} />
               </p>
             </div>
             <span className="missing">
@@ -643,7 +705,9 @@ function Pending({ classes, navigate, findRoom }) {
                 </td>
                 <td>
                   <strong>{t.days}</strong>
-                  <small>{t.time}</small>
+                  <small>
+                    <TimeDisplay value={t.time} />
+                  </small>
                 </td>
                 <td>{t.students}</td>
                 <td>
@@ -673,7 +737,78 @@ function Pending({ classes, navigate, findRoom }) {
   );
 }
 
-function RoomsPage({ navigate, classes }) {
+function RoomAvailabilityCard({ room, openAgenda }) {
+  const [open, setOpen] = useState(false);
+  const free = room.state === "Disponível";
+  const full = room.state === "Totalmente ocupada";
+  const nextFree = free
+    ? "Disponível agora"
+    : full
+      ? "Sem janela livre hoje"
+      : "12:00 – 18:00";
+  return (
+    <article className={`room-card room-compact ${free ? "recommended" : ""}`}>
+      <div className="room-head">
+        <div className={`state-icon ${free ? "ok" : full ? "no" : "warn"}`}>
+          {free ? <CheckCircle2 /> : <AlertTriangle />}
+        </div>
+        <div>
+          <button
+            className="room-title-button"
+            onClick={() => openAgenda(room.name)}
+          >
+            <h3>{room.name}</h3>
+          </button>
+          <p>{room.type}</p>
+        </div>
+      </div>
+      <div className="room-kpis">
+        <span>
+          Capacidade<strong>{room.capacity} pessoas</strong>
+        </span>
+        <span>
+          Ocupação<strong>{room.occupants.length} turma(s)</strong>
+        </span>
+      </div>
+      <Badge kind={free ? "allocation" : full ? "danger" : "pending"}>
+        {free
+          ? "✓ Disponível"
+          : full
+            ? "✕ Totalmente ocupada"
+            : "⚠ Parcialmente ocupada"}
+      </Badge>
+      <div className="next-free">
+        <small>Próximo horário livre</small>
+        <strong>{nextFree}</strong>
+      </div>
+      {open && (
+        <div className="occupied-times">
+          <strong>Horários ocupados</strong>
+          {room.occupants.length ? (
+            room.occupants.map((item) => (
+              <div key={item.id}>
+                <span>{item.days}</span>
+                <TimeDisplay value={item.time} />
+              </div>
+            ))
+          ) : (
+            <p>Nenhum horário ocupado.</p>
+          )}
+        </div>
+      )}
+      <div className="room-footer">
+        <button className="outline" onClick={() => openAgenda(room.name)}>
+          Ver agenda
+        </button>
+        <button className="link-btn" onClick={() => setOpen((v) => !v)}>
+          {open ? "Ocultar horários" : "Ver horários"}
+          <ChevronDown size={14} className={open ? "rotate" : ""} />
+        </button>
+      </div>
+    </article>
+  );
+}
+function RoomsPage({ navigate, classes, openAgenda }) {
   const [query, setQuery] = useState("");
   const [state, setState] = useState("Todos os estados");
   const rows = roomOptions
@@ -701,53 +836,12 @@ function RoomsPage({ navigate, classes }) {
         </select>
       </div>
       <div className="availability-grid">
-        {rows.map((r) => (
-          <article
-            className={`room-card ${r.state === "Disponível" ? "recommended" : ""}`}
-            key={r.name}
-          >
-            <div className="room-head">
-              <div
-                className={`state-icon ${r.state === "Disponível" ? "ok" : r.state === "Totalmente ocupada" ? "no" : "warn"}`}
-              >
-                {r.state === "Disponível" ? (
-                  <CheckCircle2 />
-                ) : (
-                  <AlertTriangle />
-                )}
-              </div>
-              <div>
-                <h3>{r.name}</h3>
-                <p>{r.type}</p>
-              </div>
-            </div>
-            <div className="capacity">
-              <span>Capacidade</span>
-              <strong>{r.capacity} pessoas</strong>
-              <small>{r.occupants.length} turma(s) alocada(s)</small>
-            </div>
-            <Badge
-              kind={
-                r.state === "Disponível"
-                  ? "allocation"
-                  : r.state === "Totalmente ocupada"
-                    ? "danger"
-                    : "pending"
-              }
-            >
-              {r.state}
-            </Badge>
-            <p className="room-detail">
-              {r.state === "Disponível"
-                ? "Nenhuma turma alocada."
-                : r.occupants.map((t) => `${t.days} · ${t.time}`).join(" | ")}
-            </p>
-            <div className="room-footer">
-              <button className="outline" onClick={() => navigate("calendar")}>
-                Ver agenda
-              </button>
-            </div>
-          </article>
+        {rows.map((room) => (
+          <RoomAvailabilityCard
+            key={room.name}
+            room={room}
+            openAgenda={openAgenda}
+          />
         ))}
       </div>
       {rows.length === 0 && (
@@ -892,8 +986,328 @@ function DirectoryPage({ type, navigate }) {
     </>
   );
 }
-function CalendarPage({ classes, navigate }) {
-  const [room, setRoom] = useState("Sala 107");
+const addDays = (date, amount) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+};
+const brDate = (date) =>
+  date.toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+const turnRanges = {
+  Manhã: [360, 720],
+  Tarde: [720, 1080],
+  Noite: [1080, 1320],
+};
+const occursInTurn = (item, day, turn, date) =>
+  dateValue(item.start) <= date &&
+  dateValue(item.end) >= date &&
+  classDays(item.days).includes(day) &&
+  timeRanges(item.time).some(
+    ([start, end]) => start < turnRanges[turn][1] && turnRanges[turn][0] < end,
+  );
+function WeeklyCell({ items, onFree, onDetails }) {
+  if (!items.length)
+    return (
+      <button className="weekly-cell free-cell" onClick={onFree}>
+        <CheckCircle2 size={15} />
+        <strong>Livre</strong>
+        <small>+ Alocar turma</small>
+      </button>
+    );
+  const conflict = items.some((a, i) =>
+    items.slice(i + 1).some((b) => schedulesOverlap(a, b)),
+  );
+  const item = items[0];
+  return (
+    <button
+      className={`weekly-cell occupied-cell ${conflict ? "cell-conflict" : ""}`}
+      onClick={() => onDetails(item)}
+    >
+      {conflict ? <AlertTriangle size={14} /> : <BookOpen size={14} />}
+      <strong>{conflict ? "Conflito" : item.course}</strong>
+      <small>
+        {conflict ? `${items.length} turmas simultâneas` : item.teacher}
+      </small>
+      <TimeDisplay value={item.time} />
+      {items.length > 1 && !conflict && <em>+{items.length - 1}</em>}
+    </button>
+  );
+}
+function WeeklyGridPage({
+  classes,
+  navigate,
+  allocateSlot,
+  findRoom,
+  editClass,
+}) {
+  const [offset, setOffset] = useState(0),
+    [query, setQuery] = useState(""),
+    [course, setCourse] = useState("Todos os cursos"),
+    [teacher, setTeacher] = useState("Todos os professores"),
+    [segment, setSegment] = useState("Todos os segmentos"),
+    [details, setDetails] = useState(null),
+    [slot, setSlot] = useState(null);
+  const monday = addDays(new Date("2026-09-07T00:00:00"), offset * 7);
+  const saturday = addDays(monday, 5);
+  const days = ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB"];
+  const dayNames = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+  const turns = ["Manhã", "Tarde", "Noite"];
+  const filtered = classes.filter(
+    (t) =>
+      (course === "Todos os cursos" || t.course === course) &&
+      (teacher === "Todos os professores" || t.teacher === teacher) &&
+      (segment === "Todos os segmentos" || t.segment === segment),
+  );
+  const hasEntityFilter =
+    course !== "Todos os cursos" ||
+    teacher !== "Todos os professores" ||
+    segment !== "Todos os segmentos";
+  const visibleRooms = roomOptions.filter(
+    (room) =>
+      room.name.toLowerCase().includes(query.toLowerCase()) &&
+      (!hasEntityFilter || filtered.some((item) => item.room === room.name)),
+  );
+  const pending = classes.filter(needsRoom);
+  const compatiblePending = slot
+    ? pending.filter(
+        (item) =>
+          item.agenda &&
+          dateValue(item.start) <= slot.date &&
+          dateValue(item.end) >= slot.date &&
+          classDays(item.days).includes(slot.day) &&
+          occursInTurn(item, slot.day, slot.turn, slot.date) &&
+          (item.local || "").trim().toUpperCase() ===
+            (roomOptions.find((room) => room.name === slot.room)?.local || "")
+              .trim()
+              .toUpperCase() &&
+          (!item.students ||
+            (roomOptions.find((room) => room.name === slot.room)?.capacity ||
+              0) >= item.students),
+      )
+    : [];
+  return (
+    <>
+      <Header
+        title="Grade Semanal de Salas"
+        subtitle="Ocupação por sala, dia e turno em uma única visão."
+        navigate={navigate}
+      />
+      <div className="week-navigation">
+        <div>
+          <button className="outline" onClick={() => setOffset((v) => v - 1)}>
+            ‹ Semana anterior
+          </button>
+          <button className="outline" onClick={() => setOffset(0)}>
+            Hoje
+          </button>
+          <button className="outline" onClick={() => setOffset((v) => v + 1)}>
+            Próxima semana ›
+          </button>
+        </div>
+        <strong>
+          {brDate(monday)} – {brDate(saturday)}
+        </strong>
+      </div>
+      <div className="weekly-filters">
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          placeholder="Buscar sala"
+        />
+        <select value={course} onChange={(e) => setCourse(e.target.value)}>
+          <option>Todos os cursos</option>
+          {courseData.map((c) => (
+            <option key={c[0]}>{c[0]}</option>
+          ))}
+        </select>
+        <select value={teacher} onChange={(e) => setTeacher(e.target.value)}>
+          <option>Todos os professores</option>
+          {teacherData.map((t) => (
+            <option key={t[0]}>{t[0]}</option>
+          ))}
+        </select>
+        <select value={segment} onChange={(e) => setSegment(e.target.value)}>
+          <option>Todos os segmentos</option>
+          {[...new Set(classes.map((t) => t.segment).filter(Boolean))].map(
+            (x) => (
+              <option key={x}>{x}</option>
+            ),
+          )}
+        </select>
+      </div>
+      <div className="weekly-scroll">
+        <div className="weekly-grid">
+          <div className="weekly-corner">Sala</div>
+          {dayNames.map((name, i) => (
+            <div className="weekly-day" key={name}>
+              <strong>{name}</strong>
+              <small>{brDate(addDays(monday, i)).slice(0, 5)}</small>
+            </div>
+          ))}
+          {visibleRooms.map((room) => (
+            <React.Fragment key={room.name}>
+              <div className="weekly-room">
+                <DoorOpen size={17} />
+                <strong>{room.name.replace("Sala ", "")}</strong>
+                <small>{room.capacity} lugares</small>
+              </div>
+              {days.map((day, dayIndex) => (
+                <div className="weekly-day-cells" key={day}>
+                  {turns.map((turn) => {
+                    const date = addDays(monday, dayIndex);
+                    const items = classes.filter(
+                      (item) =>
+                        item.room === room.name &&
+                        occursInTurn(item, day, turn, date),
+                    );
+                    return (
+                      <div className="turn-cell" key={turn}>
+                        <span className="turn-label">{turn}</span>
+                        <WeeklyCell
+                          items={items}
+                          onDetails={setDetails}
+                          onFree={() =>
+                            setSlot({ room: room.name, day, turn, date })
+                          }
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+      {details && (
+        <div className="drawer-shade" onClick={() => setDetails(null)}>
+          <aside
+            className="allocation-drawer class-drawer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button className="close" onClick={() => setDetails(null)}>
+              <X />
+            </button>
+            <small className="eyebrow">Detalhes da turma</small>
+            <h2>{details.course}</h2>
+            <p className="drawer-code">{details.code}</p>
+            <div className="drawer-info">
+              <span>
+                Professor<strong>{details.teacher}</strong>
+              </span>
+              <span>
+                Sala<strong>{details.room}</strong>
+              </span>
+              <span>
+                Período
+                <strong>
+                  {details.start} – {details.end}
+                </strong>
+              </span>
+              <span>
+                Dias<strong>{details.days}</strong>
+              </span>
+              <span>
+                Horário
+                <strong>
+                  <TimeDisplay value={details.time} expanded />
+                </strong>
+              </span>
+              <span>
+                Matrículas
+                <strong>{details.students ?? "Não informadas"}</strong>
+              </span>
+              <span>
+                Status SIG<strong>{details.sig}</strong>
+              </span>
+              <span>
+                Alocação<strong>Completa</strong>
+              </span>
+            </div>
+            <div className="drawer-actions">
+              <button
+                className="outline"
+                onClick={() => {
+                  setDetails(null);
+                  navigate("classes");
+                }}
+              >
+                Ver turma
+              </button>
+              <button
+                className="outline"
+                onClick={() => {
+                  setDetails(null);
+                  findRoom(details);
+                }}
+              >
+                Alterar sala
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  setDetails(null);
+                  editClass(details);
+                }}
+              >
+                Alterar agenda
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+      {slot && (
+        <div className="overlay">
+          <div className="modal">
+            <button className="close" onClick={() => setSlot(null)}>
+              <X />
+            </button>
+            <div className="modal-check">
+              <CalendarDays />
+            </div>
+            <h2>Alocar turma neste período</h2>
+            <p>
+              {slot.room} · {slot.day} · {slot.turn}
+            </p>
+            <div className="pending-picker">
+              {compatiblePending.length ? (
+                compatiblePending.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      allocateSlot(item, slot);
+                      setSlot(null);
+                    }}
+                  >
+                    <span>
+                      <strong>{item.course}</strong>
+                      <small>
+                        {item.code} · {item.students ?? "—"} matrículas
+                      </small>
+                    </span>
+                    <ChevronRight size={16} />
+                  </button>
+                ))
+              ) : (
+                <Empty
+                  title="Nenhuma turma compatível"
+                  text="Não há turma pendente com este dia, período e turno."
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+function CalendarPage({ classes, navigate, initialRoom, findRoom, editClass }) {
+  const [room, setRoom] = useState(initialRoom || roomOptions[0]?.name || "");
+  const [details, setDetails] = useState(null);
   const weekStart = new Date("2026-09-07T00:00:00"),
     weekEnd = new Date("2026-09-12T00:00:00");
   const scheduled = classes.filter(
@@ -902,14 +1316,32 @@ function CalendarPage({ classes, navigate }) {
       dateValue(t.start) <= weekEnd &&
       dateValue(t.end) >= weekStart,
   );
+  const roomInfo = roomUsage(
+    roomOptions.find((item) => item.name === room) || roomOptions[0],
+    classes,
+  );
   return (
     <>
       <Header
-        title="Calendário"
-        subtitle="Agenda semanal de ocupação das salas."
+        title={`Detalhes da ${room}`}
+        subtitle="Capacidade, situação e agenda semanal do ambiente."
         navigate={navigate}
         notifications={() => {}}
       />
+      <section className="room-detail-summary">
+        <span>
+          Tipo<strong>{roomInfo.type}</strong>
+        </span>
+        <span>
+          Capacidade<strong>{roomInfo.capacity} pessoas</strong>
+        </span>
+        <span>
+          Turmas no período<strong>{scheduled.length}</strong>
+        </span>
+        <span>
+          Situação<strong>{roomInfo.state}</strong>
+        </span>
+      </section>
       <div className="calendar-toolbar">
         <label>
           Sala
@@ -920,6 +1352,12 @@ function CalendarPage({ classes, navigate }) {
           </select>
         </label>
         <strong>07 – 12 de setembro de 2026</strong>
+      </div>
+      <div className="section-heading calendar-section-heading">
+        <div>
+          <h2>Agenda da {room}</h2>
+          <p>Clique em uma turma para consultar os detalhes e ações.</p>
+        </div>
       </div>
       <div className="week-grid">
         <div className="time-column">
@@ -945,14 +1383,21 @@ function CalendarPage({ classes, navigate }) {
               scheduled
                 .filter((item) => classDays(item.days).includes(day))
                 .map((item) => (
-                  <article key={item.id}>
+                  <button
+                    type="button"
+                    className="calendar-event"
+                    key={item.id}
+                    onClick={() => setDetails(item)}
+                  >
                     <strong>{item.course}</strong>
                     <small>
-                      {item.time}
+                      <TimeDisplay value={item.time} expanded />
                       <br />
                       {item.teacher}
+                      <br />
+                      {item.code}
                     </small>
-                  </article>
+                  </button>
                 ))
             ) : (
               <span className="free-slot">Livre</span>
@@ -960,6 +1405,61 @@ function CalendarPage({ classes, navigate }) {
           </div>
         ))}
       </div>
+      {details && (
+        <div className="drawer-shade" onClick={() => setDetails(null)}>
+          <aside
+            className="allocation-drawer class-drawer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button className="close" onClick={() => setDetails(null)}>
+              <X />
+            </button>
+            <small className="eyebrow">Turma alocada em {room}</small>
+            <h2>{details.course}</h2>
+            <p className="drawer-code">{details.code}</p>
+            <div className="drawer-info">
+              <span>
+                Professor<strong>{details.teacher}</strong>
+              </span>
+              <span>
+                Período
+                <strong>
+                  {details.start} – {details.end}
+                </strong>
+              </span>
+              <span>
+                Dias<strong>{details.days}</strong>
+              </span>
+              <span>
+                Horário
+                <strong>
+                  <TimeDisplay value={details.time} expanded />
+                </strong>
+              </span>
+            </div>
+            <div className="drawer-actions">
+              <button
+                className="outline"
+                onClick={() => {
+                  setDetails(null);
+                  findRoom(details);
+                }}
+              >
+                Alterar sala
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  setDetails(null);
+                  editClass(details);
+                }}
+              >
+                Alterar agenda
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
     </>
   );
 }
@@ -1105,7 +1605,9 @@ function MapPage({ classes, navigate, findRoom, editClass }) {
                   <td>{t.start}</td>
                   <td>{t.end}</td>
                   <td>{t.days}</td>
-                  <td>{t.time}</td>
+                  <td>
+                    <TimeDisplay value={t.time} />
+                  </td>
                   <td>{t.students}</td>
                   <td>{t.segment}</td>
                   <td>{t.local}</td>
@@ -1186,14 +1688,162 @@ function MapPage({ classes, navigate, findRoom, editClass }) {
   );
 }
 
+function FinderRoomCard({ room, selectRoom, openAgenda }) {
+  const [showConflicts, setShowConflicts] = useState(false);
+  const conflictCount = room.issues?.length || 0;
+  return (
+    <article
+      className={`room-card finder-room ${room.ok ? "recommended" : ""}`}
+    >
+      <div className="room-head">
+        <div
+          className={`state-icon ${room.ok ? "ok" : room.category === "conflict" ? "no" : "warn"}`}
+        >
+          {room.ok ? <CheckCircle2 /> : <AlertTriangle />}
+        </div>
+        <div>
+          <h3>{room.name}</h3>
+          <p>{room.type}</p>
+        </div>
+        {room.recommended && <Badge kind="allocation">Recomendada</Badge>}
+      </div>
+      <div className="room-kpis">
+        <span>
+          Capacidade<strong>{room.capacity} pessoas</strong>
+        </span>
+        <span>
+          Necessário<strong>{room.targetStudents || "Não informado"}</strong>
+        </span>
+      </div>
+      <Badge
+        kind={
+          room.ok
+            ? "allocation"
+            : room.category === "conflict"
+              ? "danger"
+              : "pending"
+        }
+      >
+        {room.state}
+      </Badge>
+      <div className="validation-list">
+        <span className={room.roomAvailable ? "valid" : "invalid"}>
+          {room.roomAvailable ? "✓ Sala disponível" : "✕ Sala ocupada"}
+        </span>
+        <span className={room.teacherAvailable ? "valid" : "invalid"}>
+          {room.teacherAvailable
+            ? "✓ Professor disponível"
+            : "✕ Professor indisponível"}
+        </span>
+        <span className={room.capacityOk ? "valid" : "invalid"}>
+          {room.capacityOk
+            ? "✓ Capacidade adequada"
+            : "✕ Capacidade insuficiente"}
+        </span>
+      </div>
+      {room.issues.length ? (
+        <>
+          <p className="conflict-count">
+            {conflictCount}{" "}
+            {conflictCount === 1
+              ? "impedimento encontrado"
+              : "impedimentos encontrados"}
+          </p>
+          {showConflicts && (
+            <div className="conflict-summary">
+              {room.issues.map((issue, index) => (
+                <div
+                  className="issue-detail"
+                  key={`${issue.type}-${issue.item?.id || index}`}
+                >
+                  <strong>
+                    {index + 1}. {issue.title}
+                  </strong>
+                  <p>{issue.text}</p>
+                  {issue.item && (
+                    <>
+                      <span>
+                        <b>Turma</b>
+                        {issue.item.code} · {issue.item.course}
+                      </span>
+                      <span>
+                        <b>Período</b>
+                        {issue.item.start} – {issue.item.end}
+                      </span>
+                      <span>
+                        <b>Horário</b>
+                        <TimeDisplay value={issue.item.time} />
+                      </span>
+                      <span>
+                        <b>{issue.type === "room" ? "Professor" : "Sala"}</b>
+                        {issue.type === "room"
+                          ? issue.item.teacher
+                          : issue.item.room || "Não definida"}
+                      </span>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <p className="room-detail">{room.detail}</p>
+      )}
+      <div className="room-footer">
+        {room.ok ? (
+          <button className="primary" onClick={() => selectRoom(room)}>
+            Alocar
+          </button>
+        ) : room.issues.length ? (
+          <button
+            className="outline"
+            onClick={() => setShowConflicts((v) => !v)}
+          >
+            {showConflicts ? "Ocultar detalhes" : "Ver detalhes"}
+          </button>
+        ) : (
+          <button disabled>Indisponível</button>
+        )}
+        <button className="link-btn" onClick={() => openAgenda(room.name)}>
+          Ver agenda
+        </button>
+      </div>
+    </article>
+  );
+}
 function FinderPage({
   classItem,
   classes,
   navigate,
   selectRoom,
   defineAgenda,
+  openAgenda,
 }) {
-  const analyzedRooms = analyzeRooms(classItem, classes);
+  const analysis = analyzeRooms(classItem, classes);
+  const recommendedRoom = analysis.find((room) => room.ok)?.name;
+  const analyzedRooms = analysis.map((room) => ({
+    ...room,
+    targetStudents: classItem.students,
+    recommended: room.name === recommendedRoom,
+  }));
+  const roomGroups = [
+    {
+      key: "available",
+      title: "Salas disponíveis",
+      description: "Podem ser alocadas imediatamente.",
+    },
+    {
+      key: "conflict",
+      title: "Salas com conflitos",
+      description: "Possuem conflito de sala ou professor.",
+    },
+    {
+      key: "incompatible",
+      title: "Salas incompatíveis",
+      description: "Não atendem capacidade, agenda ou unidade.",
+    },
+  ];
   if (!classItem.agenda)
     return (
       <>
@@ -1285,7 +1935,7 @@ function FinderPage({
           <strong>
             {classItem.days}
             <br />
-            {classItem.time}
+            <TimeDisplay value={classItem.time} expanded />
           </strong>
         </div>
         <div>
@@ -1303,66 +1953,30 @@ function FinderPage({
           Consulta concluída
         </span>
       </section>
-      <div className="room-grid">
-        {analyzedRooms.map((r) => (
-          <article
-            className={`room-card ${r.ok ? "recommended" : ""}`}
-            key={r.name}
-          >
-            <div className="room-head">
-              <div
-                className={`state-icon ${r.ok ? "ok" : r.disabled ? "no" : "warn"}`}
-              >
-                {r.ok ? <CheckCircle2 /> : <AlertTriangle />}
-              </div>
-              <div>
-                <h3>{r.name}</h3>
-                <p>{r.type}</p>
-              </div>
-              {r.name === "Sala 222" && (
-                <Badge kind="allocation">Recomendada</Badge>
-              )}
+      {roomGroups.map((group) => {
+        const groupRooms = analyzedRooms.filter(
+          (room) => room.category === group.key,
+        );
+        return groupRooms.length ? (
+          <section className={`room-result-group ${group.key}`} key={group.key}>
+            <div className="result-group-title">
+              <h3>{group.title}</h3>
+              <span>{groupRooms.length}</span>
+              <p>{group.description}</p>
             </div>
-            <div className="capacity">
-              <span>Capacidade</span>
-              <strong>{r.capacity} pessoas</strong>
-              <small>
-                {r.capacity >= classItem.students
-                  ? "Adequada para a turma"
-                  : `Necessário: ${classItem.students}`}
-              </small>
+            <div className="room-grid">
+              {groupRooms.map((room) => (
+                <FinderRoomCard
+                  key={room.name}
+                  room={room}
+                  selectRoom={selectRoom}
+                  openAgenda={openAgenda}
+                />
+              ))}
             </div>
-            <Badge
-              kind={
-                r.ok
-                  ? "allocation"
-                  : r.conflict || r.state === "Incompatível"
-                    ? "danger"
-                    : "pending"
-              }
-            >
-              {r.state}
-            </Badge>
-            <p className="room-detail">{r.detail}</p>
-            <div className="room-footer">
-              {r.ok ? (
-                <button className="primary" onClick={() => selectRoom(r)}>
-                  Alocar {r.name}
-                </button>
-              ) : r.conflict ? (
-                <button className="outline" onClick={() => alert(r.detail)}>
-                  Ver conflitos
-                </button>
-              ) : (
-                <button disabled>Indisponível</button>
-              )}
-              <button className="link-btn" onClick={() => navigate("calendar")}>
-                Ver agenda
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
+          </section>
+        ) : null;
+      })}
     </>
   );
 }
@@ -1613,7 +2227,9 @@ function ConfirmModal({ data, close, confirm }) {
           <span>
             Agenda
             <strong>
-              {data.classItem.days} · {data.classItem.time}
+              {data.classItem.days}
+              <br />
+              <TimeDisplay value={data.classItem.time} expanded />
             </strong>
           </span>
           <span>
@@ -1659,6 +2275,7 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [calendarRoom, setCalendarRoom] = useState(roomOptions[0]?.name || "");
   const [toast, setToast] = useState("");
   const navigate = (next) => {
     setPage(next);
@@ -1667,6 +2284,11 @@ function App() {
   const findRoom = (item) => {
     setSelected({ ...item, returnPage: page });
     setPage("finder");
+  };
+  const openRoomAgenda = (roomName) => {
+    setCalendarRoom(roomName);
+    setPage("calendar");
+    setSelected(null);
   };
   const defineAgenda = (id) => {
     const agenda = {
@@ -1684,8 +2306,21 @@ function App() {
     setTimeout(() => setToast(""), 4500);
   };
   const confirmAllocation = () => {
-    const { id } = confirmation.classItem;
+    const candidate = confirmation.classItem;
     const room = confirmation.room.name;
+    const currentValidation = analyzeRooms(
+      { ...candidate, room },
+      classes,
+    ).find((option) => option.name === room);
+    if (!currentValidation?.ok) {
+      setToast(
+        currentValidation?.issues?.[0]?.text ||
+          "A alocação deixou de ser válida. Revise os conflitos.",
+      );
+      setTimeout(() => setToast(""), 4500);
+      return;
+    }
+    const { id } = candidate;
     setClasses((all) => all.map((t) => (t.id === id ? { ...t, room } : t)));
     setConfirmation(null);
     setSelected(null);
@@ -1702,16 +2337,23 @@ function App() {
       analyzeRooms(candidate, classes).find(
         (room) => room.name === candidate.room,
       )?.ok;
-    const updated = remainsValid ? candidate : { ...candidate, room: null };
+    if (!remainsValid) {
+      const validation = analyzeRooms(candidate, classes).find(
+        (room) => room.name === candidate.room,
+      );
+      setToast(
+        validation?.issues?.[0]?.text ||
+          "A alteração criaria um conflito. Nenhuma mudança foi salva.",
+      );
+      setTimeout(() => setToast(""), 4500);
+      return;
+    }
+    const updated = candidate;
     setClasses((all) =>
       all.map((item) => (item.id === updated.id ? updated : item)),
     );
     setEditing(null);
-    setToast(
-      remainsValid
-        ? "Turma atualizada com sucesso."
-        : "Turma atualizada. A sala foi liberada porque a nova agenda possui conflito.",
-    );
+    setToast("Turma atualizada com sucesso.");
     setTimeout(() => setToast(""), 4500);
   };
   const createClass = (data) => {
@@ -1747,6 +2389,21 @@ function App() {
     );
     setTimeout(() => setToast(""), 4500);
   };
+  const allocateWeeklySlot = (item, slot) => {
+    const candidate = {
+      ...item,
+      room: slot.room,
+    };
+    const room = analyzeRooms(candidate, classes).find(
+      (option) => option.name === slot.room,
+    );
+    if (!room?.ok) {
+      setToast(room?.detail || "Este horário não está disponível.");
+      setTimeout(() => setToast(""), 4500);
+      return;
+    }
+    setConfirmation({ classItem: candidate, room });
+  };
   const props = { navigate };
   let content;
   switch (page) {
@@ -1761,7 +2418,9 @@ function App() {
       );
       break;
     case "rooms":
-      content = <RoomsPage classes={classes} {...props} />;
+      content = (
+        <RoomsPage classes={classes} openAgenda={openRoomAgenda} {...props} />
+      );
       break;
     case "classes":
       content = (
@@ -1781,7 +2440,26 @@ function App() {
       content = <DirectoryPage type="teachers" {...props} />;
       break;
     case "calendar":
-      content = <CalendarPage classes={classes} {...props} />;
+      content = (
+        <CalendarPage
+          classes={classes}
+          initialRoom={calendarRoom}
+          findRoom={findRoom}
+          editClass={setEditing}
+          {...props}
+        />
+      );
+      break;
+    case "week":
+      content = (
+        <WeeklyGridPage
+          classes={classes}
+          navigate={navigate}
+          allocateSlot={allocateWeeklySlot}
+          findRoom={findRoom}
+          editClass={setEditing}
+        />
+      );
       break;
     case "map":
       content = (
@@ -1799,6 +2477,8 @@ function App() {
           classItem={selected}
           classes={classes}
           navigate={navigate}
+          defineAgenda={defineAgenda}
+          openAgenda={openRoomAgenda}
           selectRoom={(room) => setConfirmation({ classItem: selected, room })}
         />
       ) : (
