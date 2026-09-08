@@ -26,6 +26,7 @@ import {
   Eye,
 } from "lucide-react";
 import "./styles.css";
+import { initialClasses as spreadsheetClasses } from "./data/turmas.js";
 
 const initialClasses = [
   {
@@ -193,6 +194,25 @@ const roomOptions = [
     local: "CEP Alecrim",
   },
 ];
+for (const roomName of [
+  ...new Set(
+    spreadsheetClasses
+      .map((item) => item.room)
+      .filter((room) => /^Sala \d+$/.test(room)),
+  ),
+]) {
+  if (!roomOptions.some((room) => room.name === roomName)) {
+    const assigned = spreadsheetClasses.filter(
+      (item) => item.room === roomName,
+    );
+    roomOptions.push({
+      name: roomName,
+      capacity: Math.max(30, ...assigned.map((item) => item.students || 0)),
+      type: "Sala convencional",
+      local: "CEP ALECRIM",
+    });
+  }
+}
 const dayAliases = {
   Seg: "SEG",
   Ter: "TER",
@@ -209,13 +229,24 @@ const dateValue = (value) => {
 };
 const isoToBr = (value) => (value ? value.split("-").reverse().join("/") : "");
 const timeRange = (value) => {
-  const matches = (value || "").match(/(\d{2}):(\d{2})/g) || [];
+  const matches = (value || "").match(/\d{1,2}(?::\d{2}|h)/g) || [];
   if (matches.length < 2) return null;
   const toMinutes = (x) => {
-    const [h, m] = x.split(":").map(Number);
+    const [h, m] = x.replace("h", ":00").split(":").map(Number);
     return h * 60 + m;
   };
   return [toMinutes(matches[0]), toMinutes(matches[1])];
+};
+const timeRanges = (value) => {
+  const matches = (value || "").match(/\d{1,2}(?::\d{2}|h)/g) || [];
+  const toMinutes = (x) => {
+    const [h, m] = x.replace("h", ":00").split(":").map(Number);
+    return h * 60 + m;
+  };
+  const ranges = [];
+  for (let index = 0; index + 1 < matches.length; index += 2)
+    ranges.push([toMinutes(matches[index]), toMinutes(matches[index + 1])]);
+  return ranges;
 };
 const classDays = (value) =>
   Object.entries(dayAliases)
@@ -229,9 +260,12 @@ const schedulesOverlap = (a, b) => {
   const shared = classDays(a.days).some((day) =>
     classDays(b.days).includes(day),
   );
-  const ar = timeRange(a.time),
-    br = timeRange(b.time);
-  return shared && ar && br && ar[0] < br[1] && br[0] < ar[1];
+  const aRanges = timeRanges(a.time),
+    bRanges = timeRanges(b.time);
+  return (
+    shared &&
+    aRanges.some((ar) => bRanges.some((br) => ar[0] < br[1] && br[0] < ar[1]))
+  );
 };
 function analyzeRooms(target, classes) {
   const teacherConflict =
@@ -248,7 +282,9 @@ function analyzeRooms(target, classes) {
     );
     const conflicts = occupants.filter((t) => schedulesOverlap(target, t));
     const capacityOk = !target.students || room.capacity >= target.students;
-    const localOk = target.local === room.local;
+    const localOk =
+      (target.local || "").trim().toUpperCase() ===
+      (room.local || "").trim().toUpperCase();
     const ok = Boolean(
       target.agenda &&
       capacityOk &&
@@ -289,7 +325,13 @@ function analyzeRooms(target, classes) {
   });
 }
 function roomUsage(room, classes) {
-  const occupants = classes.filter((t) => t.room === room.name);
+  const referenceDate = new Date("2026-09-08T00:00:00");
+  const occupants = classes.filter(
+    (t) =>
+      t.room === room.name &&
+      dateValue(t.start) <= referenceDate &&
+      dateValue(t.end) >= referenceDate,
+  );
   const hours = occupants.reduce((sum, t) => {
     const range = timeRange(t.time);
     return sum + (range ? (range[1] - range[0]) / 60 : 0);
@@ -306,16 +348,28 @@ function roomUsage(room, classes) {
   };
 }
 const courseData = [
-  ["Programador Full Stack", "240h", "Tecnologia"],
-  ["Programação em C#", "160h", "Tecnologia"],
-  ["Banco de Dados", "120h", "Tecnologia"],
-  ["Informática Básica", "80h", "Gestão"],
+  ...new Map(
+    spreadsheetClasses.map((item) => [
+      item.course,
+      [
+        item.course,
+        item.che ? `${item.che}h` : "Carga horária não informada",
+        item.segment || "Sem segmento",
+      ],
+    ]),
+  ).values(),
 ];
 const teacherData = [
-  ["Valtemir", "Desenvolvimento de sistemas", "Mensalista"],
-  ["Carlos Silva", "Programação", "Horista"],
-  ["Ana Souza", "Banco de dados", "Mensalista"],
-  ["Juliana Santos", "Informática", "Mensalista"],
+  ...new Map(
+    spreadsheetClasses.map((item) => [
+      item.teacher,
+      [
+        item.teacher,
+        item.segment || "Área não informada",
+        item.link || "Vínculo não informado",
+      ],
+    ]),
+  ).values(),
 ];
 const Badge = ({ children, kind = "" }) => (
   <span
@@ -324,6 +378,9 @@ const Badge = ({ children, kind = "" }) => (
     {children}
   </span>
 );
+const needsRoom = (item) =>
+  !item.room &&
+  !["encerrada", "cancelada"].includes((item.sig || "").trim().toLowerCase());
 
 function Sidebar({ page, navigate, pending }) {
   const items = [
@@ -422,7 +479,7 @@ function SearchBox({ value, onChange, placeholder = "Buscar" }) {
 }
 
 function Dashboard({ classes, navigate, findRoom }) {
-  const pending = classes.filter((t) => !t.room);
+  const pending = classes.filter(needsRoom);
   return (
     <>
       <Header
@@ -517,7 +574,7 @@ function Pending({ classes, navigate, findRoom }) {
   const [q, setQ] = useState("");
   const [priority, setPriority] = useState("Todas");
   const rows = classes
-    .filter((t) => !t.room)
+    .filter(needsRoom)
     .filter(
       (t) =>
         !q ||
@@ -837,7 +894,14 @@ function DirectoryPage({ type, navigate }) {
 }
 function CalendarPage({ classes, navigate }) {
   const [room, setRoom] = useState("Sala 107");
-  const scheduled = classes.filter((t) => t.room === room);
+  const weekStart = new Date("2026-09-07T00:00:00"),
+    weekEnd = new Date("2026-09-12T00:00:00");
+  const scheduled = classes.filter(
+    (t) =>
+      t.room === room &&
+      dateValue(t.start) <= weekEnd &&
+      dateValue(t.end) >= weekStart,
+  );
   return (
     <>
       <Header
@@ -850,9 +914,9 @@ function CalendarPage({ classes, navigate }) {
         <label>
           Sala
           <select value={room} onChange={(e) => setRoom(e.target.value)}>
-            <option>Sala 107</option>
-            <option>Sala 222</option>
-            <option>Sala 104</option>
+            {roomOptions.map((item) => (
+              <option key={item.name}>{item.name}</option>
+            ))}
           </select>
         </label>
         <strong>07 – 12 de setembro de 2026</strong>
@@ -905,7 +969,7 @@ function MapPage({ classes, navigate, findRoom, editClass }) {
     [compact, setCompact] = useState(false),
     [expanded, setExpanded] = useState(null);
   const rows = classes
-    .filter((t) => !only || !t.room)
+    .filter((t) => !only || needsRoom(t))
     .filter((t) =>
       Object.values(t).join(" ").toLowerCase().includes(q.toLowerCase()),
     );
@@ -924,7 +988,7 @@ function MapPage({ classes, navigate, findRoom, editClass }) {
         </div>
         <button className="warning-stat" onClick={() => setOnly(true)}>
           <span>Aguardando sala</span>
-          <b>{classes.filter((t) => !t.room).length}</b>
+          <b>{classes.filter(needsRoom).length}</b>
         </button>
         <div>
           <span>Em processo</span>
@@ -1591,7 +1655,7 @@ function ConfirmModal({ data, close, confirm }) {
 }
 function App() {
   const [page, setPage] = useState("dashboard");
-  const [classes, setClasses] = useState(initialClasses);
+  const [classes, setClasses] = useState(spreadsheetClasses);
   const [selected, setSelected] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -1652,7 +1716,7 @@ function App() {
   };
   const createClass = (data) => {
     const draft = {
-      ...initialClasses[1],
+      ...spreadsheetClasses[0],
       id: Date.now(),
       code: `2026.11.${Math.floor(600 + Math.random() * 300)}`,
       course: data.course,
@@ -1754,7 +1818,7 @@ function App() {
       <Sidebar
         page={page}
         navigate={navigate}
-        pending={classes.filter((t) => !t.room).length}
+        pending={classes.filter(needsRoom).length}
       />
       <main>{content}</main>
       {confirmation && (
