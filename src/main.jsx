@@ -471,9 +471,17 @@ function Sidebar({ page, navigate, pending }) {
         {items.map(([id, label, Icon]) => (
           <button
             key={id}
-            className={page === id ? "active" : ""}
+            className={
+              page === id || (id === "teachers" && page === "teacher-details")
+                ? "active"
+                : ""
+            }
             onClick={() => navigate(id)}
-            aria-current={page === id ? "page" : undefined}
+            aria-current={
+              page === id || (id === "teachers" && page === "teacher-details")
+                ? "page"
+                : undefined
+            }
           >
             <Icon size={18} />
             <span>{label}</span>
@@ -949,7 +957,7 @@ function ClassesPage({ classes, navigate, findRoom, editClass }) {
   );
 }
 
-function DirectoryPage({ type, navigate }) {
+function DirectoryPage({ type, navigate, viewTeacher }) {
   const isCourse = type === "courses";
   const data = isCourse ? courseData : teacherData;
   return (
@@ -975,7 +983,9 @@ function DirectoryPage({ type, navigate }) {
             <Badge kind="sig">{item[2]}</Badge>
             <button
               className="outline"
-              onClick={() => navigate(isCourse ? "classes" : "calendar")}
+              onClick={() =>
+                isCourse ? navigate("classes") : viewTeacher(item[0])
+              }
             >
               <Eye size={15} />
               Visualizar
@@ -983,6 +993,127 @@ function DirectoryPage({ type, navigate }) {
           </article>
         ))}
       </div>
+    </>
+  );
+}
+
+function TeacherDetailsPage({
+  teacherName,
+  classes,
+  navigate,
+  findRoom,
+  editClass,
+}) {
+  const [view, setView] = useState("availability");
+  const [details, setDetails] = useState(null);
+  const teacher = teacherData.find((item) => item[0] === teacherName);
+  const teacherClasses = classes.filter(
+    (item) =>
+      item.teacher.trim().toLowerCase() === teacherName.trim().toLowerCase(),
+  );
+  const days = [
+    ["SEG", "Segunda"],
+    ["TER", "Terça"],
+    ["QUA", "Quarta"],
+    ["QUI", "Quinta"],
+    ["SEX", "Sexta"],
+    ["SÁB", "Sábado"],
+  ];
+  const turns = [
+    ["08:00 – 12:00", 8 * 60, 12 * 60],
+    ["13:00 – 17:00", 13 * 60, 17 * 60],
+    ["18:30 – 21:30", 18 * 60 + 30, 21 * 60 + 30],
+  ];
+  const inTurn = (item, start, end) =>
+    timeRanges(item.time).some(
+      ([itemStart, itemEnd]) => itemStart < end && start < itemEnd,
+    );
+  const conflicts = [];
+  teacherClasses.forEach((item, index) => {
+    teacherClasses.slice(index + 1).forEach((other) => {
+      if (schedulesOverlap(item, other)) conflicts.push([item, other]);
+    });
+  });
+  const weeklyHours = teacherClasses.reduce((total, item) => {
+    const hours = timeRanges(item.time).reduce(
+      (sum, [start, end]) => sum + (end - start) / 60,
+      0,
+    );
+    return total + hours * Math.max(classDays(item.days).length, 1);
+  }, 0);
+  if (!teacher) {
+    return (
+      <Empty
+        title="Professor não encontrado"
+        text="Retorne à equipe docente e selecione outro professor."
+        action={() => navigate("teachers")}
+      />
+    );
+  }
+  return (
+    <>
+      <Header
+        title={teacherName}
+        subtitle="Perfil, turmas e disponibilidade calculados pela agenda atual."
+        navigate={navigate}
+      />
+      <button className="back" onClick={() => navigate("teachers")}>
+        <ChevronLeft size={16} /> Voltar para professores
+      </button>
+      <section className="teacher-profile-summary">
+        <div className="teacher-profile-main">
+          <div className="directory-icon"><UserRound /></div>
+          <span>Professor</span>
+          <h2>{teacherName}</h2>
+          <Badge kind="allocation">✓ Ativo</Badge>
+        </div>
+        <span>Área/segmento<strong>{teacher[1]}</strong></span>
+        <span>Vínculo<strong>{teacher[2]}</strong></span>
+        <span>Turmas associadas<strong>{teacherClasses.length}</strong></span>
+        <span>Carga semanal<strong>{weeklyHours.toLocaleString("pt-BR")} horas</strong></span>
+        <span>Conflitos<strong className={conflicts.length ? "danger-text" : "success-text"}>{conflicts.length ? `⚠ ${conflicts.length}` : "✓ Nenhum"}</strong></span>
+      </section>
+      <div className="teacher-view-tabs">
+        <button className={view === "classes" ? "selected" : ""} onClick={() => setView("classes")}>Ver turmas</button>
+        <button className={view === "availability" ? "selected" : ""} onClick={() => setView("availability")}>Ver disponibilidade</button>
+        <button className={view === "agenda" ? "selected" : ""} onClick={() => setView("agenda")}>Ver agenda semanal</button>
+      </div>
+      {conflicts.length > 0 && (
+        <section className="teacher-conflict-alert">
+          <AlertTriangle />
+          <div><strong>Conflito de professor</strong><p>Existem turmas com dias, períodos e horários sobrepostos.</p></div>
+          <span>{conflicts.map(([first, second]) => `${first.code} × ${second.code}`).join(" · ")}</span>
+        </section>
+      )}
+      {view === "classes" && (
+        <div className="table-wrap">
+          <table><thead><tr><th>Curso</th><th>Código</th><th>Sala</th><th>Período</th><th>Dias e horários</th><th>Ação</th></tr></thead>
+          <tbody>{teacherClasses.map((item) => <tr key={item.id}><td><strong>{item.course}</strong></td><td>{item.code}</td><td>{item.room || "Sala pendente"}</td><td>{item.start} – {item.end}</td><td>{item.days}<TimeDisplay value={item.time} /></td><td><button className="outline" onClick={() => setDetails(item)}>Ver turma</button></td></tr>)}</tbody></table>
+        </div>
+      )}
+      {(view === "availability" || view === "agenda") && (
+        <section className={`teacher-week ${view}`}>
+          {days.map(([day, label]) => (
+            <article className="teacher-day" key={day}>
+              <h3>{label}</h3>
+              {turns.map(([labelTime, start, end]) => {
+                const occupied = teacherClasses.filter((item) => classDays(item.days).includes(day) && inTurn(item, start, end));
+                return <div className={`teacher-slot ${occupied.length ? "occupied" : "free"}`} key={labelTime}><strong>{labelTime}</strong>{occupied.length ? occupied.map((item) => <button key={item.id} onClick={() => setDetails(item)}><span>{item.course}</span><small>{item.code} · {item.room || "Sala pendente"}</small><TimeDisplay value={item.time} /></button>) : <span>✓ Livre</span>}</div>;
+              })}
+            </article>
+          ))}
+        </section>
+      )}
+      {details && (
+        <div className="drawer-shade" onClick={() => setDetails(null)}>
+          <aside className="allocation-drawer class-drawer" onClick={(event) => event.stopPropagation()}>
+            <button className="close" onClick={() => setDetails(null)}><X /></button>
+            <small className="eyebrow">Detalhes da turma</small><h2>{details.course}</h2><p className="drawer-code">{details.code}</p>
+            <div className="drawer-info"><span>Professor<strong>{details.teacher}</strong></span><span>Sala<strong>{details.room || "Pendente"}</strong></span><span>Período<strong>{details.start} – {details.end}</strong></span><span>Dias<strong>{details.days}</strong></span><span>Horário<strong><TimeDisplay value={details.time} expanded /></strong></span><span>Matrículas<strong>{details.students ?? "Não informadas"}</strong></span><span>Status SIG<strong>{details.sig}</strong></span></div>
+            <div className="drawer-actions"><button className="outline" onClick={() => { setDetails(null); findRoom(details); }}>Alterar sala</button><button className="primary" onClick={() => { setDetails(null); editClass(details); }}>Alterar agenda</button></div>
+          </aside>
+        </div>
+      )}
     </>
   );
 }
@@ -2276,6 +2407,7 @@ function App() {
   const [confirmation, setConfirmation] = useState(null);
   const [editing, setEditing] = useState(null);
   const [calendarRoom, setCalendarRoom] = useState(roomOptions[0]?.name || "");
+  const [selectedTeacher, setSelectedTeacher] = useState("");
   const [toast, setToast] = useState("");
   const navigate = (next) => {
     setPage(next);
@@ -2288,6 +2420,11 @@ function App() {
   const openRoomAgenda = (roomName) => {
     setCalendarRoom(roomName);
     setPage("calendar");
+    setSelected(null);
+  };
+  const openTeacher = (teacherName) => {
+    setSelectedTeacher(teacherName);
+    setPage("teacher-details");
     setSelected(null);
   };
   const defineAgenda = (id) => {
@@ -2437,7 +2574,24 @@ function App() {
       content = <DirectoryPage type="courses" {...props} />;
       break;
     case "teachers":
-      content = <DirectoryPage type="teachers" {...props} />;
+      content = (
+        <DirectoryPage
+          type="teachers"
+          viewTeacher={openTeacher}
+          {...props}
+        />
+      );
+      break;
+    case "teacher-details":
+      content = (
+        <TeacherDetailsPage
+          teacherName={selectedTeacher}
+          classes={classes}
+          navigate={navigate}
+          findRoom={findRoom}
+          editClass={setEditing}
+        />
+      );
       break;
     case "calendar":
       content = (
